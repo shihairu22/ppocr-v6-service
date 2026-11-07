@@ -5,6 +5,7 @@ WORKDIR /app
 RUN pip install --no-cache-dir fastapi uvicorn onnxruntime numpy pillow
 
 COPY ocr_app.py /app/ocr_app.py
+COPY models/ /app/models/
 
 EXPOSE 9899
 
