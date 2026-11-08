@@ -45,6 +45,15 @@ if os.path.exists(CRNN_PATH):
     except Exception as e:
         print("CRNN 加载失败:", e, flush=True)
 
+U2M = None
+if os.path.exists("/app/models/u2_crnn_best.onnx"):
+    try:
+        U2M = _Engine("/app/models/u2_crnn_best.onnx",
+                      charset_path="/app/models/u2_charset.json")
+        print("U2 CRNN 模型已加载", flush=True)
+    except Exception as e:
+        print("U2 模型加载失败:", e, flush=True)
+
 _CIRCLED = {chr(0x2460 + i): str(i + 1) for i in range(20)}
 
 
@@ -107,7 +116,7 @@ def health():
     return {
         "status": "ok",
         "ocr_service_initialized": True,
-        "models": ["v6"] + (["pthome"] if CRNN else []),
+        "models": ["v6"] + (["pthome"] if CRNN else []) + (["u2"] if U2M else []),
         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
 
@@ -123,11 +132,13 @@ def ocr(req: Req):
 
     if req.model == "pthome":
         eng = CRNN or V6
+    elif req.model == "u2":
+        eng = U2M or V6
     else:
         eng = V6
 
     try:
-        x = _prep_crnn(im) if (req.model == "pthome" and CRNN) else _prep(im)
+        x = _prep_crnn(im) if (req.model in ("pthome", "u2") and eng is not V6) else _prep(im)
         out = eng.sess.run(None, {eng.inp: x})[0]
     except Exception as e:
         raise HTTPException(status_code=503, detail=f"推理失败: {e}")
