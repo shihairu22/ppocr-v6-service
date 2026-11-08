@@ -26,14 +26,16 @@ _app = FastAPI(title="PP-OCRv6 OCR Service")
 
 
 class _Engine:
-    def __init__(self, model_path, dict_path=None, charset_path=None):
+    def __init__(self, model_path, dict_path=None, charset_path=None, decode="ctc"):
         self.sess = ort.InferenceSession(model_path, providers=["CPUExecutionProvider"])
         self.inp = self.sess.get_inputs()[0].name
         self.chars = None
+        self.decode = decode
         if dict_path and os.path.exists(dict_path):
             self.chars = [l.rstrip("\n") for l in open(dict_path, encoding="utf-8")]
         elif charset_path and os.path.exists(charset_path):
-            self.chars = json.load(open(charset_path, encoding="utf-8"))["charset"]
+            _j = json.load(open(charset_path, encoding="utf-8"))
+            self.chars = _j["charset"] if isinstance(_j, dict) else _j
 
 
 V6 = _Engine(os.environ.get("MODEL_PATH", "/app/models/rec.onnx"),
@@ -53,6 +55,16 @@ if os.path.exists("/app/models/u2_crnn_best.onnx"):
         print("U2 CRNN 模型已加载", flush=True)
     except Exception as e:
         print("U2 模型加载失败:", e, flush=True)
+
+# pthome 定长 6 头模型（2026-11-08 升级版，优先于 CRNN）
+PTH6 = None
+if os.path.exists("/app/models/pthome_fixed6.onnx"):
+    try:
+        PTH6 = _Engine("/app/models/pthome_fixed6.onnx",
+                       charset_path="/app/models/pthome_charset_fixed6.json", decode="fixed")
+        print(f"pthome 定长模型已加载（{len(PTH6.chars)} 类）", flush=True)
+    except Exception as e:
+        print("pthome 定长模型加载失败:", e, flush=True)
 
 _CIRCLED = {chr(0x2460 + i): str(i + 1) for i in range(20)}
 
@@ -116,7 +128,7 @@ def health():
     return {
         "status": "ok",
         "ocr_service_initialized": True,
-        "models": ["v6"] + (["pthome"] if CRNN else []) + (["u2"] if U2M else []),
+        "models": ["v6"] + (["pthome"] if (PTH6 or CRNN) else []) + (["u2"] if U2M else []),
         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
 
@@ -131,6 +143,8 @@ def ocr(req: Req):
         raise HTTPException(status_code=400, detail=f"图片解析失败: {e}")
 
     if req.model == "pthome":
+        eng = PTH6 or CRNN or V6
+    elif req.model == "pthome_crnn":
         eng = CRNN or V6
     elif req.model == "u2":
         eng = U2M or V6
@@ -138,12 +152,22 @@ def ocr(req: Req):
         eng = V6
 
     try:
-        x = _prep_crnn(im) if (req.model in ("pthome", "u2") and eng is not V6) else _prep(im)
+        x = _prep_crnn(im) if (req.model in ("pthome", "pthome_crnn", "u2") and eng is not V6) else _prep(im)
         out = eng.sess.run(None, {eng.inp: x})[0]
     except Exception as e:
         raise HTTPException(status_code=503, detail=f"推理失败: {e}")
 
-    text, conf = _ctc(out, eng.chars or [])
+    if getattr(eng, "decode", "ctc") == "fixed":
+        # 定长模型：[1, npos, NC] → 逐位 argmax（无 CTC）
+        lg = np.asarray(out, dtype=np.float32)
+        lg = lg.reshape(-1, lg.shape[-1])       # [npos, NC]
+        idx = lg.argmax(axis=-1)
+        probs = lg.max(axis=-1)
+        chars = eng.chars or []
+        text = "".join(chars[i] if 0 <= i < len(chars) else "" for i in idx)
+        conf = float(np.mean([float(probs[k]) for k in range(len(idx))])) if len(idx) else 0.0
+    else:
+        text, conf = _ctc(out, eng.chars or [])
     return {
         "result": text,
         "confidence": round(conf, 4),
